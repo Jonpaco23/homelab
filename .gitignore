@@ -1,1 +1,4 @@
 postgres/
+npm/data/
+npm/letsencrypt/
+servarr/configs
