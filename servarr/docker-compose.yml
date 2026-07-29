@@ -83,6 +83,8 @@ services:
       - mediarr
     environment:
       - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
     ports:
       - 8191:8191
     restart: always
@@ -99,7 +101,7 @@ services:
       - OPENVPN_CONFIG=france
       - OPENVPN_USERNAME=p7949402
       - OPENVPN_PASSWORD=VohxtGir86
-      - LOCAL_NETWORK=192.168.0.0/16
+      - LOCAL_NETWORK=10.24.0.0/16
       - TRANSMISSION_DOWNLOAD_DIR=/mnt/servarr/downloads/completed
       - TRANSMISSION_INCOMPLETE_DIR=/mnt/servarr/downloads/incomplete
     logging:
