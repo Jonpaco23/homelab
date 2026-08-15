@@ -1,36 +1,40 @@
 #!/bin/bash
 #
-# backup-app.sh — Generic backup script: tar a data directory and push it to
-# an NFS-mounted NAS, with retention pruning, logging, and locking.
+# backup-app.sh — Generic backup script: mirrors an app's data directory to
+# an NFS-mounted NAS location, using an atomic swap so the destination is
+# always a complete, consistent copy (safe for restic or similar tools to
+# back up from). Retention/versioning is left to restic, not this script.
 #
 # Usage:
 #   backup-app.sh -n <app_name> -s <source_dir> -d <nas_dest_dir> [options]
 #
 # Required:
-#   -n  App name (used for filenames/logs), e.g. "actualbudget"
+#   -n  App name (used for logging/locking), e.g. "actualbudget"
 #   -s  Source data directory to back up, e.g. /opt/actualbudget/data
-#   -d  Destination directory on the NFS mount, e.g. /mnt/nas-backups/actualbudget
+#   -d  Destination directory on the NFS mount that mirrors the source,
+#       e.g. /mnt/nas-backups/actualbudget  (this is what restic should
+#       point its backup job at)
 #
 # Optional:
-#   -k  Days to keep backups (default: 14)
-#   -b  Command to run BEFORE backup (e.g. "docker stop actualbudget")
-#   -a  Command to run AFTER backup (e.g. "docker start actualbudget")
-#   -t  Local temp dir for staging the archive (default: /tmp/backups)
+#   -b  Command to run BEFORE copying (e.g. "docker stop actualbudget")
+#   -a  Command to run AFTER copying (e.g. "docker start actualbudget")
 #   -q  Quiet mode — only log errors, not routine progress
 #
 # Example:
 #   ./backup-app.sh -n vaultwarden -s /opt/vaultwarden/data \
-#       -d /mnt/nas-backups/vaultwarden -k 14 \
+#       -d /mnt/nas-backups/vaultwarden \
 #       -b "docker stop vaultwarden" -a "docker start vaultwarden"
 #
 # Add to cron, e.g.:
-#   0 3 * * * /usr/local/bin/backup-app.sh -n vaultwarden -s /opt/vaultwarden/data -d /mnt/nas-backups/vaultwarden -b "docker stop vaultwarden" -a "docker start vaultwarden" >> /var/log/backup-vaultwarden.log 2>&1
+#   0 3 * * * /usr/local/bin/backup-app.sh -n vaultwarden -s /opt/vaultwarden/data -d /mnt/nas-backups/vaultwarden -b "docker stop vaultwarden" -a "docker start vaultwarden" -q >> /var/log/backup-vaultwarden.log 2>&1
+#
+# Then point a restic backup job at the destination directories on the NAS,
+# scheduled to run after all app mirror jobs have finished, e.g.:
+#   restic backup /mnt/nas-backups/vaultwarden /mnt/nas-backups/actualbudget
 
 set -euo pipefail
 
 # ---------- Defaults ----------
-KEEP_DAYS=14
-LOCAL_TMP=/tmp/backups
 PRE_CMD=""
 POST_CMD=""
 QUIET=0
@@ -41,15 +45,13 @@ usage() {
     exit 1
 }
 
-while getopts "n:s:d:k:b:a:t:qh" opt; do
+while getopts "n:s:d:b:a:qh" opt; do
     case "$opt" in
         n) APP="$OPTARG" ;;
         s) SRC_DIR="$OPTARG" ;;
         d) DEST_DIR="$OPTARG" ;;
-        k) KEEP_DAYS="$OPTARG" ;;
         b) PRE_CMD="$OPTARG" ;;
         a) POST_CMD="$OPTARG" ;;
-        t) LOCAL_TMP="$OPTARG" ;;
         q) QUIET=1 ;;
         h|*) usage ;;
     esac
@@ -78,13 +80,13 @@ if ! flock -n 200; then
 fi
 
 # ---------- Setup ----------
-DATE=$(date +%Y%m%d-%H%M%S)
-mkdir -p "$LOCAL_TMP" "$DEST_DIR"
-ARCHIVE_NAME="${APP}-${DATE}.tar.gz"
-LOCAL_ARCHIVE="${LOCAL_TMP}/${ARCHIVE_NAME}"
+DEST_PARENT="$(dirname "$DEST_DIR")"
+mkdir -p "$DEST_PARENT"
+TMP_DEST="${DEST_DIR}.tmp-$$"
+OLD_DEST="${DEST_DIR}.old-$$"
 
 cleanup() {
-    rm -f "$LOCAL_ARCHIVE"
+    rm -rf "$TMP_DEST" "$OLD_DEST" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -94,56 +96,39 @@ if [ -n "$PRE_CMD" ]; then
     eval "$PRE_CMD"
 fi
 
-# Ensure post-hook always runs, even if backup fails, if a pre-hook ran
 run_post() {
     if [ -n "$POST_CMD" ]; then
         log "Running post-backup command: $POST_CMD"
         eval "$POST_CMD"
     fi
 }
-if [ -n "$PRE_CMD" ]; then
-    trap 'run_post; cleanup' EXIT
-fi
 
-# ---------- Archive ----------
-log "Archiving '$SRC_DIR' -> '$LOCAL_ARCHIVE'"
-tar -czf "$LOCAL_ARCHIVE" -C "$(dirname "$SRC_DIR")" "$(basename "$SRC_DIR")"
-
-# ---------- Post-backup hook (restart app etc.) as early as possible ----------
-if [ -n "$PRE_CMD" ]; then
-    run_post
-    trap cleanup EXIT   # reset trap so run_post doesn't fire twice
-fi
-
-# ---------- Copy to NAS ----------
-log "Copying archive to NAS: $DEST_DIR"
-REMOTE_TMP="${DEST_DIR}/.${ARCHIVE_NAME}.partial"
-if ! cp "$LOCAL_ARCHIVE" "$REMOTE_TMP"; then
+# ---------- Copy data directory to NAS (staged, then swapped in atomically) ----------
+log "Copying '$SRC_DIR' -> '$TMP_DEST'"
+rm -rf "$TMP_DEST"
+if ! cp -r "$SRC_DIR" "$TMP_DEST"; then
     log "ERROR: copy to NAS failed for $APP"
-    rm -f "$REMOTE_TMP"
-    exit 1
-fi
-# Atomic rename into place once the full copy has landed
-if ! mv "$REMOTE_TMP" "${DEST_DIR}/${ARCHIVE_NAME}"; then
-    log "ERROR: rename on NAS failed for $APP"
-    rm -f "$REMOTE_TMP"
+    run_post
     exit 1
 fi
 
-# ---------- Verify ----------
-REMOTE_FILE="${DEST_DIR}/${ARCHIVE_NAME}"
-LOCAL_SIZE=$(stat -c%s "$LOCAL_ARCHIVE" 2>/dev/null || stat -f%z "$LOCAL_ARCHIVE")
-REMOTE_SIZE=$(stat -c%s "$REMOTE_FILE" 2>/dev/null || stat -f%z "$REMOTE_FILE")
-if [ "$LOCAL_SIZE" != "$REMOTE_SIZE" ]; then
-    log "ERROR: size mismatch after copy (local=$LOCAL_SIZE remote=$REMOTE_SIZE)"
+# App can come back up now that the copy is done — don't hold it down
+# through the swap/verify steps below.
+run_post
+
+# ---------- Verify copy looks complete before swapping it in ----------
+SRC_COUNT=$(find "$SRC_DIR" | wc -l)
+TMP_COUNT=$(find "$TMP_DEST" | wc -l)
+if [ "$SRC_COUNT" != "$TMP_COUNT" ]; then
+    log "ERROR: item count mismatch (source=$SRC_COUNT copied=$TMP_COUNT), aborting swap"
     exit 1
 fi
-log "Backup verified: $REMOTE_FILE ($REMOTE_SIZE bytes)"
 
-# ---------- Prune old backups on NAS ----------
-log "Pruning backups older than $KEEP_DAYS days in $DEST_DIR"
-find "$DEST_DIR" -maxdepth 1 -name "${APP}-*.tar.gz" -mtime "+${KEEP_DAYS}" -print -delete | while read -r f; do
-    log "Deleted old backup: $f"
-done
+# ---------- Atomic swap into place ----------
+if [ -d "$DEST_DIR" ]; then
+    mv "$DEST_DIR" "$OLD_DEST"
+fi
+mv "$TMP_DEST" "$DEST_DIR"
+rm -rf "$OLD_DEST"
 
-log "Backup of '$APP' complete."
+log "Backup of '$APP' complete: $DEST_DIR ($TMP_COUNT items)"
