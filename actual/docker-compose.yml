@@ -1,0 +1,92 @@
+services:
+  # ------------------------------------------------------------------
+  # Actual Budget server
+  # ------------------------------------------------------------------
+  actual_server:
+    image: docker.io/actualbudget/actual-server:latest
+    container_name: actual_server
+    restart: unless-stopped
+    ports:
+      - '5006:5006'
+    volumes:
+      - ./actual-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "node scripts/health-check.js"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 20s
+
+  # ------------------------------------------------------------------
+  # Ollama - local LLM runtime (this is what "self-hosted AI" runs on)
+  # Small quantized models keep this usable on old/CPU-only hardware.
+  # ------------------------------------------------------------------
+  ollama:
+    image: docker.io/ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - '11434:11434'   # optional to expose; only needed if you want to hit it from outside the compose network
+    volumes:
+      - ./ollama-data:/root/.ollama
+    # Uncomment below if you have an NVIDIA GPU available and want to use it.
+    # On old CPU-only hardware, leave this commented out and just pick a small model.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # One-shot helper container: pulls the model on first startup so you
+  # don't have to `docker exec` in manually. Exits once the pull is done.
+  ollama-pull:
+    image: docker.io/ollama/ollama:latest
+    container_name: ollama_pull
+    depends_on:
+      - ollama
+    entrypoint: >
+      sh -c "
+        until ollama list >/dev/null 2>&1; do
+          echo 'waiting for ollama...'; sleep 2;
+        done &&
+        ollama pull qwen2.5:3b
+      "
+    environment:
+      OLLAMA_HOST: ollama:11434   # ollama CLI reads this env var - no --host flag exists
+
+  # ------------------------------------------------------------------
+  # actual-ai - pulls uncategorized transactions from Actual, asks the
+  # LLM (Ollama here) to classify them, writes the category back.
+  # ------------------------------------------------------------------
+  actual-ai:
+    image: docker.io/sakowicz/actual-ai:latest
+    container_name: actual_ai
+    restart: unless-stopped
+    depends_on:
+      actual_server:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      ACTUAL_SERVER_URL: http://actual_server:5006
+      ACTUAL_PASSWORD: mns0agns1          # <-- set this
+      ACTUAL_BUDGET_ID: ee1b1966-01b7-47aa-9637-1551950b72f5    # <-- Settings > Show advanced settings > Sync ID
+
+      LLM_PROVIDER: openai
+      OPENAI_BASE_URL: http://ollama:11434/v1          # note: /api, not /v1, for the ollama provider
+      OPENAI_MODEL: qwen2.5:3b                          # must match the model pulled above
+
+      # How often to run classification (cron syntax). Every 4 hours here;
+      # tune this down if you want faster feedback after SimpleFIN syncs.
+      CLASSIFICATION_SCHEDULE_CRON: "0 */4 * * *"
+
+      # dryRun is ON by default in actual-ai - it will log what it *would*
+      # categorize without writing anything to Actual. Leave this alone at
+      # first (see testing steps below); remove "dryRun" only once you've
+      # verified results look right.
+      FEATURES: '["classifyOnStartup", "syncAccountsBeforeClassify"]'
+      # Add "suggestNewCategories" once you're happy with baseline accuracy.
+      # Leave "freeWebSearch" off initially on old hardware - it adds latency
+      # per-transaction for merchant lookups you may not need.
