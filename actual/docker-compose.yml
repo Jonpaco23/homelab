@@ -29,7 +29,7 @@ services:
       - CRON_SCHEDULE=0 1 * * *
       - LOG_LEVEL=info
       - ACTUAL_BUDGET_SYNC_IDS_FILE=/run/secrets/actual_budget_sync_id
-      - TIMEZONE=Etc/EST
+      - TIMEZONE=America/New_York
 
 secrets:
   actual_budget_sync_id:
