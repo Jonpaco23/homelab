@@ -24,7 +24,7 @@ services:
       - actual_budget_sync_id
       - actual_server_password
     environment:
-      - ACTUAL_SERVER_URL=your-server-url
+      - ACTUAL_SERVER_URL=http://localhost:5006
       - ACTUAL_SERVER_PASSWORD_FILE=/run/secrets/actual_server_password
       - CRON_SCHEDULE=0 1 * * *
       - LOG_LEVEL=info
