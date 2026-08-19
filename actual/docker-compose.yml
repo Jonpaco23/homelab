@@ -30,6 +30,7 @@ services:
       - LOG_LEVEL=info
       - ACTUAL_BUDGET_SYNC_IDS_FILE=/run/secrets/actual_budget_sync_id
       - TIMEZONE=America/New_York
+      - RUN_ON_START=true
 
 secrets:
   actual_budget_sync_id:
