@@ -24,13 +24,16 @@ services:
       - actual_budget_sync_id
       - actual_server_password
     environment:
-      - ACTUAL_SERVER_URL=http://localhost:5006
+      - ACTUAL_SERVER_URL=http://actual_server:5006
       - ACTUAL_SERVER_PASSWORD_FILE=/run/secrets/actual_server_password
       - CRON_SCHEDULE=0 1 * * *
       - LOG_LEVEL=info
       - ACTUAL_BUDGET_SYNC_IDS_FILE=/run/secrets/actual_budget_sync_id
       - TIMEZONE=America/New_York
       - RUN_ON_START=true
+    depends_on:
+      actual_server:
+        condition: service_healthy
 
 secrets:
   actual_budget_sync_id:
