@@ -1,0 +1,38 @@
+services:
+  # ------------------------------------------------------------------
+  # Actual Budget server
+  # ------------------------------------------------------------------
+  actual_server:
+    image: docker.io/actualbudget/actual-server:latest
+    container_name: actual_server
+    restart: unless-stopped
+    ports:
+      - '5006:5006'
+    volumes:
+      - ./actual-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "node scripts/health-check.js"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 20s
+
+
+  actual-auto-sync:
+    image: seriouslag/actual-auto-sync:latest
+    secrets:
+      - actual_budget_sync_id
+      - actual_server_password
+    environment:
+      - ACTUAL_SERVER_URL=your-server-url
+      - ACTUAL_SERVER_PASSWORD_FILE=/run/secrets/actual_server_password
+      - CRON_SCHEDULE=0 1 * * *
+      - LOG_LEVEL=info
+      - ACTUAL_BUDGET_SYNC_IDS_FILE=/run/secrets/actual_budget_sync_id
+      - TIMEZONE=Etc/EST
+
+secrets:
+  actual_budget_sync_id:
+    file: actual_budget_sync_id.txt
+  actual_server_password:
+    file: actual_server_password.txt
