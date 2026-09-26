@@ -158,5 +158,5 @@ volumes:
     driver: local
     driver_opts:
       type: nfs
-      o: addr=10.0.0.2
+      o: addr=10.42.0.30
       device: :/mnt/slurpee-1-pool/servarr
